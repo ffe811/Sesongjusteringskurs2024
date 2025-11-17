@@ -1,0 +1,223 @@
+---
+title: "Sesongjusteringskurs 2024, RJdemetra" 
+author: "811/FFE"
+date: "`r Sys.Date()`"
+output: html_document 
+---
+
+```{r setup, include=FALSE}
+#knitr::opts_chunk$set(echo = TRUE)
+#knitr::opts_chunk$set(cache = FALSE)
+#knitr::opts_chunk$set(fig.cap = "", fig.path = "Plot")
+```
+
+```{r Loading,include=FALSE }
+
+#library(RJDemetra)
+library(tidyverse)
+library(plotly)
+#library(TSstudio)
+#library(shiny)
+library(lubridate)
+library(kableExtra)
+library(plyr)
+library(arrow)
+library(PxWebApiData)
+library(pickmdl)
+
+library(car)   ### linearHypothesis-funksjonen
+#library(rjdqa)
+#library(moments) ### skewness()
+library(htmltools)
+
+#setwd("/ssb/stamme04/reiseliv/NV/wk48/delt/sesongjustering")
+#fame_data <- read_parquet("serier_u_s_g_overnatting.parquet")
+#fame_data <- mutate(fame_data,dato = as.Date(paste0(dato,"-01")))
+
+#setwd("/ssb/stamme04/reiseliv/NV/wk48/delt/sesongjustering/ANEogFFE/")
+
+#load("Ses_models.RData")
+
+#total_series <- serienavn[which(grepl(".tot.overn.nor",serienavn))]
+#groups <- rev(unique(substr(serienavn,2,3)))
+
+```
+
+
+
+# Lese inn data og modellere med standardspesifikasjoner
+
+```{r mainshow, include=TRUE,echo=TRUE, results='hide'}
+
+setwd("/ssb/bruker/felles/kurs_sesongjustering") # sette working directory. Bruk gjerne din hjemmemappe
+#setwd("ssb/bruker/[dine initialer her]")  
+
+
+# Henter data fra statistikkbanken
+
+VHI <- select(as_tibble(ApiData("https://data.ssb.no/api/v0/no/table/07129/",ContentsCode ="VolumUjustert",Tid=TRUE,NACE=TRUE)$dataset),-ContentsCode,-NAstatus)
+VHI <- mutate(VHI,NACE=paste0(paste0("SNN",NACE),"_IVL_U"))
+
+VHI <- pivot_wider(VHI,names_from=NACE,values_from=value)
+
+
+## Velger ut Varehandelsindeksen for dagligvarehandel. Gjøre om til tidsserie-objekt
+
+VHI_471 <- as.numeric(VHI$SNN47.1_IVL_U)
+VHI_471 <- ts(VHI_471,start=c(2000,1),frequency=12)
+
+# sesongjustering med spefikasjon RSA5c 
+
+model_rsa5c <- x13(VHI_471,spec = "RSA5c")
+
+# se nærmere på resultatet:
+
+ model_rsa5c$regarima      # detaljer om forhåndsjustering
+ model_rsa5c$final$series  # komponentene
+ model_rsa5c$decomposition # informasjon om filterlengder 
+ model_rsa5c$diagnostics   # tester for residualsesong 
+
+
+# ulike typer innebygde plot 
+
+
+plot(model_rsa5c,type_chart="sa-trend")
+plot(model_rsa5c,type_chart="sa-trend",first_date=c(2015,1))
+
+plot(model_rsa5c,type="cal-seas-irr")
+plot(model_rsa5c,type="cal-seas-irr",first_date=c(2015,1))
+
+plot(model_rsa5c$decomposition,type="S-I-ratio",first_date=c(2015,1))
+
+# for mer fancy plot, se nederst i dokumentet
+
+
+```
+
+
+# Endre spesifikasjoner
+
+```{r spec_def, include=TRUE,echo=TRUE, results='asis'}
+
+# Tar utgangspunkt i spec rsa5c som vi må lagre som eget objekt for å endre på det.
+
+rsa5c_spec <- x13_spec(model_rsa5c)   
+
+## Sette multiplikativ eller additiv modell manuelt
+
+rsa5c_additiv <- x13_spec(rsa5c_spec, transform.function = "None") ## "Log" for multiplikativ
+model_rsa5c_add <- x13(VHI_471,rsa5c_additiv)
+
+# sette  workingdays eller tradingdays manuelt
+
+rsa5c_wd <- x13_spec(rsa5c_spec,tradingdays.option= "WorkingDays")
+rsa5c_td <- x13_spec(rsa5c_spec,tradingdays.option= "TradingDays")
+rsa5c_notd <- x13_spec(rsa5c_spec,tradingdays.option= "None")
+
+# sette outliers manuelt 
+
+rsa5c_outlier <- x13_spec(rsa5c_spec,usrdef.outliersEnabled = TRUE,usrdef.outliersType = c("LS","AO","AO"),usrdef.outliersDate = c("2020-03-01","2020-06-01","2021-12-01"))
+
+# sette outliers span fra 
+
+rsa5c_outlier_span <- x13_spec(rsa5c_spec,outlier.from="2022-01-01") 
+
+# skru av outliers 
+
+rsa5c_no_outlier <- x13_spec(rsa5c_spec,outlier.enabled=FALSE)
+rsa5c_no_tc <- x13_spec(rsa5c_spec,outlier.tc=FALSE)
+
+# estimere fra 
+
+rsa5c_fom2008 <- x13_spec(rsa5c_spec,estimate.from="2008-01-01")
+
+### ?x13_spec viser de uendelige muligheter man har til å mikke på spec'ene
+
+  
+
+```
+
+
+# Definere kalendere med funksjonen konstruksjon()
+
+```{r konstruksjon, include=TRUE,echo=TRUE, results='asis'}
+
+# sjekk ?konstruksjon for informasjon om parametere
+
+kalender_1 <- konstruksjon(forste_ar = 2000, siste_ar = 2050, 
+  k_roddag = TRUE, t_roddag = "sondag", 
+  rod_dag = c("jan1", "mai1", "mai17", "des24", "des25", "des26"), 
+  k_fpk = TRUE, ant_fpk = 7, t_fpk = "egen_effekt", 
+  paske_egen = 1, paske_mdl = "X12", t_pklordag = "egen_effekt",
+  t_pinse = "sondag", k_td = TRUE, td_type = "TD6", 
+  k_grupper = TRUE, monster = c(1, 1, 2, 2, 2, 3), 
+  fjerne_se_td = TRUE, skudd_ar = TRUE)$samle_mnd[,-1]
+kalender_1 <- ts(kalender_1,start=c(2000,1),frequency=12)
+
+
+                           
+### sesongjustere med egendefinert kalender       
+
+kalender1_spec <- x13_spec(rsa5c_spec,usrdef.varEnabled= TRUE, usrdef.varType = "Calendar",usrdef.var=kalender_1)
+
+model_kalender1 <- x13(VHI_471,kalender1_spec)
+```
+
+
+# Pickmdl()-funksjonen 
+
+```{r pickmdl, include=TRUE,echo=TRUE,eval=FALSE, results='asis'}
+
+## pickmodell - velge kun blant fem modeller på listen 
+model1 <- x13_pickmdl(VHI_471,spec=kalender1_spec,pickmdl_method = "first",identification_end=c(2022,12))
+
+# informasjon om pickmodel-prosedyre:
+ok(model1)
+
+## pickmodell - forsøke automodell hvis modellene på listen ikke er tilfredsstillende
+
+model2 <- x13_pickmdl(VHI_471,spec=kalender1_spec,pickmdl_method = "first_tryautomdl",identification_end=c(2022,12))
+
+##  pandemien som level shift i tråd med SSBs anbefalinger
+
+model1_corona <- x13_pickmdl(VHI_471,spec=kalender1_spec,pickmdl_method = "first_tryautomdl",identification_end=c(2022,12),corona=TRUE)
+
+ok(model1_corona)
+
+```
+
+
+# Interaktive plot med plotly
+
+
+```{r plotly, include=TRUE,echo=TRUE, results='asis'}
+
+library(plotly)
+library(htmltools)
+    
+model1_corona <- x13_pickmdl(VHI_471,spec=kalender1_spec,pickmdl_method = "first_tryautomdl",identification_end=c(2022,12),corona=TRUE)
+
+
+start_now <- c(2000,1)
+
+data_now <- ts(c(model1_corona$final$series[,1],rep(NA,12)),start=start_now,frequency=12)
+    model_sa <- ts(c(model1_corona$final$series[,2],model1_corona$final$forecast[,2]),start=start_now,frequency=12)
+    model_trend <- ts(c(model1_corona$final$series[,3],model1_corona$final$forecast[,3]),start=start_now,frequency=12)
+    
+    
+    model_selected <- data.frame(cbind(as.numeric(time(data_now)),data_now,model_sa,model_trend))
+    colnames(model_selected) <- c("date","Ujustert","SA","Trend")
+    
+    
+    
+    tagList(plot_ly(model_selected,type= 'scatter',mode='lines') %>%
+    layout(xaxis=list(title="")) %>%
+    add_trace(x = ~date_decimal(date), y = ~Ujustert,name="Ujustert",line=list(color="lightslategrey",dash='dot',width=1)) %>%
+    add_trace(x = ~date_decimal(date), y = ~SA,name="SA",line=list(color="darkblue")) %>%
+    add_trace(x = ~date_decimal(date), y = ~Trend,name="Trend",line=list(color="tomato",dash="dot")))
+    
+  
+   
+
+```
+
